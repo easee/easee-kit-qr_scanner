@@ -65,6 +65,20 @@ class QRView(
 
         barcodeView?.pause()
         barcodeView = null
+        killCameraAndroid()
+    }
+
+    fun killCameraAndroid() {
+
+        var camera = android.hardware.Camera.open()
+
+        if(camera!=null){
+            camera.cancelAutoFocus();
+            camera.stopPreview()
+            camera.setPreviewCallback(null)
+            camera.release()
+            camera = null
+        }
     }
 
     override fun getView(): View = initBarCodeView()
