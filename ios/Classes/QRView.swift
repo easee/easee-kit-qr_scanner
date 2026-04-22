@@ -1,304 +1,399 @@
-//
-//  QRView.swift
-//  flutter_qr
-//
-//  Created by Julius Canute on 21/12/18.
-//
-
 import Foundation
-import MTBBarcodeScanner
+import AVFoundation
+import Flutter
 
-public class QRView:NSObject,FlutterPlatformView {
-    @IBOutlet var previewView: UIView!
-    var scanner: MTBBarcodeScanner?
+public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjectsDelegate {
+
+    private var previewView: UIView
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var captureSession: AVCaptureSession?
+    private var metadataOutput: AVCaptureMetadataOutput?
+    private var currentDevice: AVCaptureDevice?
+    private let sessionQueue = DispatchQueue(label: "net.touchcapture.qr.sessionQueue")
+
+    private var cameraPosition: AVCaptureDevice.Position
+    private var pendingScanRect: CGRect?
+    private var allowedBarcodeTypes: [AVMetadataObject.ObjectType] = []
+    private var scanResultBlock: (([AVMetadataObject]) -> Void)?
+
     var registrar: FlutterPluginRegistrar
     var channel: FlutterMethodChannel
-    var cameraFacing: MTBCamera
-    
-    // Codabar, maxicode, rss14 & rssexpanded not supported. Replaced with qr.
-    // UPCa uses ean13 object.
-    var QRCodeTypes = [
-          0: AVMetadataObject.ObjectType.aztec,
-          1: AVMetadataObject.ObjectType.qr,
-          2: AVMetadataObject.ObjectType.code39,
-          3: AVMetadataObject.ObjectType.code93,
-          4: AVMetadataObject.ObjectType.code128,
-          5: AVMetadataObject.ObjectType.dataMatrix,
-          6: AVMetadataObject.ObjectType.ean8,
-          7: AVMetadataObject.ObjectType.ean13,
-          8: AVMetadataObject.ObjectType.interleaved2of5,
-          9: AVMetadataObject.ObjectType.qr,
-          10: AVMetadataObject.ObjectType.pdf417,
-          11: AVMetadataObject.ObjectType.qr,
-          12: AVMetadataObject.ObjectType.qr,
-          13: AVMetadataObject.ObjectType.qr,
-          14: AVMetadataObject.ObjectType.ean13,
-          15: AVMetadataObject.ObjectType.upce
-         ]
-    
-    public init(withFrame frame: CGRect, withRegistrar registrar: FlutterPluginRegistrar, withId id: Int64, params: Dictionary<String, Any>){
+
+    // Channel integer (0=back, 1=front) → AVCaptureDevice.Position
+    private func avPosition(from channelValue: Int) -> AVCaptureDevice.Position {
+        channelValue == 1 ? .front : .back
+    }
+
+    // AVCaptureDevice.Position → channel integer (0=back, 1=front)
+    private func channelValue(from position: AVCaptureDevice.Position) -> Int {
+        position == .front ? 1 : 0
+    }
+
+    private let QRCodeTypes: [Int: AVMetadataObject.ObjectType] = [
+        0: .aztec,
+        1: .qr,
+        2: .code39,
+        3: .code93,
+        4: .code128,
+        5: .dataMatrix,
+        6: .ean8,
+        7: .ean13,
+        8: .interleaved2of5,
+        9: .qr,
+        10: .pdf417,
+        11: .qr,
+        12: .qr,
+        13: .qr,
+        14: .ean13,
+        15: .upce
+    ]
+
+    public init(withFrame frame: CGRect,
+                withRegistrar registrar: FlutterPluginRegistrar,
+                withId id: Int64,
+                params: Dictionary<String, Any>) {
         self.registrar = registrar
-        previewView = UIView(frame: frame)
-        cameraFacing = MTBCamera.init(rawValue: UInt(Int(params["cameraFacing"] as! Double))) ?? MTBCamera.back
-        channel = FlutterMethodChannel(name: "net.touchcapture.qr.flutterqr/qrview_\(id)", binaryMessenger: registrar.messenger())
+        self.previewView = UIView(frame: frame)
+        let facingRaw = Int(params["cameraFacing"] as! Double)
+        self.cameraPosition = facingRaw == 1 ? .front : .back
+        self.channel = FlutterMethodChannel(
+            name: "net.touchcapture.qr.flutterqr/qrview_\(id)",
+            binaryMessenger: registrar.messenger()
+        )
     }
-    
+
     deinit {
-        scanner?.stopScanning()
+        sessionQueue.sync {
+            captureSession?.stopRunning()
+        }
     }
-    
+
     public func view() -> UIView {
-        channel.setMethodCallHandler({
-            [weak self] (call: FlutterMethodCall, result: @escaping FlutterResult) -> Void in
-            switch(call.method){
-                case "setDimensions":
-                    let arguments = call.arguments as! Dictionary<String, Double>
-                    self?.setDimensions(result,
-                                        width: arguments["width"] ?? 0,
-                                        height: arguments["height"] ?? 0,
-                                        scanAreaWidth: arguments["scanAreaWidth"] ?? 0,
-                                        scanAreaHeight: arguments["scanAreaHeight"] ?? 0,
-                                        scanAreaOffset: arguments["scanAreaOffset"] ?? 0)
-                case "startScan":
-                    self?.startScan(call.arguments as! Array<Int>, result)
-                case "flipCamera":
-                    self?.flipCamera(result)
-                case "toggleFlash":
-                    self?.toggleFlash(result)
-                case "pauseCamera":
-                    self?.pauseCamera(result)
-                case "stopCamera":
-                    self?.stopCamera(result)
-                case "resumeCamera":
-                    self?.resumeCamera(result)
-                case "getCameraInfo":
-                    self?.getCameraInfo(result)
-                case "getFlashInfo":
-                    self?.getFlashInfo(result)
-                case "getSystemFeatures":
-                    self?.getSystemFeatures(result)
-                default:
-                    result(FlutterMethodNotImplemented)
-                    return
+        channel.setMethodCallHandler({ [weak self] (call: FlutterMethodCall, result: @escaping FlutterResult) in
+            switch call.method {
+            case "setDimensions":
+                let args = call.arguments as! Dictionary<String, Double>
+                self?.setDimensions(result,
+                                    width: args["width"] ?? 0,
+                                    height: args["height"] ?? 0,
+                                    scanAreaWidth: args["scanAreaWidth"] ?? 0,
+                                    scanAreaHeight: args["scanAreaHeight"] ?? 0,
+                                    scanAreaOffset: args["scanAreaOffset"] ?? 0)
+            case "startScan":
+                self?.startScan(call.arguments as! Array<Int>, result)
+            case "flipCamera":
+                self?.flipCamera(result)
+            case "toggleFlash":
+                self?.toggleFlash(result)
+            case "pauseCamera":
+                self?.pauseCamera(result)
+            case "stopCamera":
+                self?.stopCamera(result)
+            case "resumeCamera":
+                self?.resumeCamera(result)
+            case "getCameraInfo":
+                self?.getCameraInfo(result)
+            case "getFlashInfo":
+                self?.getFlashInfo(result)
+            case "getSystemFeatures":
+                self?.getSystemFeatures(result)
+            default:
+                result(FlutterMethodNotImplemented)
             }
         })
         return previewView
     }
-    
-    func setDimensions(_ result: @escaping FlutterResult, width: Double, height: Double, scanAreaWidth: Double, scanAreaHeight: Double, scanAreaOffset: Double) {
-        // Then set the size of the preview area.
+
+    // MARK: - setDimensions
+
+    func setDimensions(_ result: @escaping FlutterResult,
+                       width: Double, height: Double,
+                       scanAreaWidth: Double, scanAreaHeight: Double,
+                       scanAreaOffset: Double) {
         previewView.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        
-        // Then set the size of the scan area.
-        let midX = self.view().bounds.midX
-        let midY = self.view().bounds.midY
-        
-        if let sc: MTBBarcodeScanner = scanner {
-            // Set the size of the preview if preview is already created.
-            if let previewLayer = sc.previewLayer {
-                previewLayer.frame = self.previewView.bounds
-            }
-        } else {
-            // Create new preview.
-            scanner = MTBBarcodeScanner(previewView: previewView)
-        }
 
-        // Set scanArea if provided.
-        if (scanAreaWidth != 0 && scanAreaHeight != 0) {
-            scanner?.didStartScanningBlock = {
-                self.scanner?.scanRect = CGRect(x: Double(midX) - (scanAreaWidth / 2), y: Double(midY) - (scanAreaHeight / 2), width: scanAreaWidth, height: scanAreaHeight)
-
-                // Set offset if provided.
-                if (scanAreaOffset != 0) {
-                    let reversedOffset = -scanAreaOffset
-                    self.scanner?.scanRect = (self.scanner?.scanRect.offsetBy(dx: 0, dy: CGFloat(reversedOffset)))!
-
-                }
-            }
-        }
-        return result(width)
-        
-    }
-    
-    func startScan(_ arguments: Array<Int>, _ result: @escaping FlutterResult) {
-        // Check for allowed barcodes
-        var allowedBarcodeTypes: Array<AVMetadataObject.ObjectType> = []
-        arguments.forEach { arg in
-            allowedBarcodeTypes.append( QRCodeTypes[arg]!)
-        }
-        MTBBarcodeScanner.requestCameraPermission(success: { [weak self] permissionGranted in
+        DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.previewLayer?.frame = self.previewView.bounds
+        }
 
-            self.channel.invokeMethod("onPermissionSet", arguments: permissionGranted)
+        if scanAreaWidth != 0 && scanAreaHeight != 0 {
+            let midX = previewView.bounds.midX
+            let midY = previewView.bounds.midY
+            var rect = CGRect(
+                x: Double(midX) - scanAreaWidth / 2,
+                y: Double(midY) - scanAreaHeight / 2,
+                width: scanAreaWidth,
+                height: scanAreaHeight
+            )
+            if scanAreaOffset != 0 {
+                rect = rect.offsetBy(dx: 0, dy: CGFloat(-scanAreaOffset))
+            }
+            pendingScanRect = rect
 
-            if permissionGranted {
-                do {
-                    try self.scanner?.startScanning(with: self.cameraFacing, resultBlock: { [weak self] codes in
-                        if let codes = codes {
-                            for code in codes {
-                                var typeString: String;
-                                switch(code.type) {
-                                    case AVMetadataObject.ObjectType.aztec:
-                                       typeString = "AZTEC"
-                                    case AVMetadataObject.ObjectType.code39:
-                                        typeString = "CODE_39"
-                                    case AVMetadataObject.ObjectType.code93:
-                                        typeString = "CODE_93"
-                                    case AVMetadataObject.ObjectType.code128:
-                                        typeString = "CODE_128"
-                                    case AVMetadataObject.ObjectType.dataMatrix:
-                                        typeString = "DATA_MATRIX"
-                                    case AVMetadataObject.ObjectType.ean8:
-                                        typeString = "EAN_8"
-                                    case AVMetadataObject.ObjectType.ean13:
-                                        typeString = "EAN_13"
-                                    case AVMetadataObject.ObjectType.itf14,
-                                         AVMetadataObject.ObjectType.interleaved2of5:
-                                        typeString = "ITF"
-                                    case AVMetadataObject.ObjectType.pdf417:
-                                        typeString = "PDF_417"
-                                    case AVMetadataObject.ObjectType.qr:
-                                        typeString = "QR_CODE"
-                                    case AVMetadataObject.ObjectType.upce:
-                                        typeString = "UPC_E"
-                                    default:
-                                        return
-                                }
-                                let bytes = { () -> Data? in
-                                    if #available(iOS 11.0, *) {
-                                        switch (code.descriptor) {
-                                        case let qrDescriptor as CIQRCodeDescriptor:
-                                            return qrDescriptor.errorCorrectedPayload
-                                        case let aztecDescriptor as CIAztecCodeDescriptor:
-                                            return aztecDescriptor.errorCorrectedPayload
-                                        case let pdf417Descriptor as CIPDF417CodeDescriptor:
-                                            return pdf417Descriptor.errorCorrectedPayload
-                                        case let dataMatrixDescriptor as CIDataMatrixCodeDescriptor:
-                                            return dataMatrixDescriptor.errorCorrectedPayload
-                                        default:
-                                            return nil
-                                        }
-                                    } else {
-                                        return nil
-                                    }
-                                }()
-                                let result = { () -> [String : Any]? in
-                                    guard let stringValue = code.stringValue else {
-                                        guard let safeBytes = bytes else {
-                                            return nil
-                                        }
-                                        return ["type": typeString, "rawBytes": safeBytes]
-                                    }
-                                    guard let safeBytes = bytes else {
-                                        return ["code": stringValue, "type": typeString]
-                                    }
-                                    return ["code": stringValue, "type": typeString, "rawBytes": safeBytes]
-                                }()
-                                guard result != nil else { continue }
-                                if allowedBarcodeTypes.count == 0 || allowedBarcodeTypes.contains(code.type) {
-                                    self?.channel.invokeMethod("onRecognizeQR", arguments: result)
-                                }
-                                
-                            }
-                        }
-
-                    })
-                } catch {
-                    let scanError = FlutterError(code: "unknown-error", message: "Unable to start scanning", details: error)
-                    result(scanError)
+            // Apply immediately if the session is already running
+            if let session = captureSession, session.isRunning,
+               let layer = previewLayer,
+               let output = metadataOutput {
+                let converted = layer.metadataOutputRectConverted(fromLayerRect: rect)
+                sessionQueue.async {
+                    output.rectOfInterest = converted
                 }
             }
-        })
+        }
+
+        result(width)
     }
-    
+
+    // MARK: - startScan
+
+    func startScan(_ arguments: Array<Int>, _ result: @escaping FlutterResult) {
+        allowedBarcodeTypes = arguments.compactMap { QRCodeTypes[$0] }
+
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                self.channel.invokeMethod("onPermissionSet", arguments: granted)
+            }
+            guard granted else { return }
+            self.sessionQueue.async {
+                do {
+                    try self.configureSession()
+                    self.captureSession?.startRunning()
+                    self.applyPendingScanRect()
+                } catch {
+                    DispatchQueue.main.async {
+                        result(FlutterError(code: "unknown-error", message: "Unable to start scanning", details: "\(error)"))
+                    }
+                }
+            }
+        }
+    }
+
+    private func configureSession() throws {
+        let session = AVCaptureSession()
+        captureSession = session
+        session.beginConfiguration()
+
+        guard let device = captureDevice(for: cameraPosition) else {
+            throw NSError(domain: "QRScanner", code: 1, userInfo: [NSLocalizedDescriptionKey: "No camera available"])
+        }
+        currentDevice = device
+        let input = try AVCaptureDeviceInput(device: device)
+        guard session.canAddInput(input) else {
+            throw NSError(domain: "QRScanner", code: 2, userInfo: [NSLocalizedDescriptionKey: "Cannot add camera input"])
+        }
+        session.addInput(input)
+
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else {
+            throw NSError(domain: "QRScanner", code: 3, userInfo: [NSLocalizedDescriptionKey: "Cannot add metadata output"])
+        }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        // Set supported types after adding output to session
+        let requested = allowedBarcodeTypes.isEmpty
+            ? output.availableMetadataObjectTypes
+            : allowedBarcodeTypes.filter { output.availableMetadataObjectTypes.contains($0) }
+        output.metadataObjectTypes = requested
+        metadataOutput = output
+
+        session.commitConfiguration()
+
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        previewLayer = layer
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            layer.frame = self.previewView.bounds
+            self.previewView.layer.insertSublayer(layer, at: 0)
+        }
+    }
+
+    private func applyPendingScanRect() {
+        guard let rect = pendingScanRect,
+              let layer = previewLayer,
+              let output = metadataOutput else { return }
+        DispatchQueue.main.async {
+            let converted = layer.metadataOutputRectConverted(fromLayerRect: rect)
+            self.sessionQueue.async {
+                output.rectOfInterest = converted
+            }
+        }
+    }
+
+    // MARK: - AVCaptureMetadataOutputObjectsDelegate
+
+    public func metadataOutput(_ output: AVCaptureMetadataOutput,
+                                didOutput metadataObjects: [AVMetadataObject],
+                                from connection: AVCaptureConnection) {
+        for obj in metadataObjects {
+            guard let readable = obj as? AVMetadataMachineReadableCodeObject else { continue }
+
+            let typeString: String
+            switch readable.type {
+            case .aztec:             typeString = "AZTEC"
+            case .code39:            typeString = "CODE_39"
+            case .code93:            typeString = "CODE_93"
+            case .code128:           typeString = "CODE_128"
+            case .dataMatrix:        typeString = "DATA_MATRIX"
+            case .ean8:              typeString = "EAN_8"
+            case .ean13:             typeString = "EAN_13"
+            case .itf14,
+                 .interleaved2of5:   typeString = "ITF"
+            case .pdf417:            typeString = "PDF_417"
+            case .qr:                typeString = "QR_CODE"
+            case .upce:              typeString = "UPC_E"
+            default:                 continue
+            }
+
+            let bytes: Data? = {
+                switch readable.descriptor {
+                case let d as CIQRCodeDescriptor:       return d.errorCorrectedPayload
+                case let d as CIAztecCodeDescriptor:    return d.errorCorrectedPayload
+                case let d as CIPDF417CodeDescriptor:   return d.errorCorrectedPayload
+                case let d as CIDataMatrixCodeDescriptor: return d.errorCorrectedPayload
+                default: return nil
+                }
+            }()
+
+            let payload: [String: Any]?
+            if let str = readable.stringValue {
+                if let b = bytes {
+                    payload = ["code": str, "type": typeString, "rawBytes": b]
+                } else {
+                    payload = ["code": str, "type": typeString]
+                }
+            } else if let b = bytes {
+                payload = ["type": typeString, "rawBytes": b]
+            } else {
+                payload = nil
+            }
+
+            guard let p = payload else { continue }
+
+            if allowedBarcodeTypes.isEmpty || allowedBarcodeTypes.contains(readable.type) {
+                channel.invokeMethod("onRecognizeQR", arguments: p)
+            }
+        }
+    }
+
+    // MARK: - Camera controls
+
     func stopCamera(_ result: @escaping FlutterResult) {
-        if let sc: MTBBarcodeScanner = self.scanner {
-            if sc.isScanning() {
-                sc.stopScanning()
-            }
+        sessionQueue.async { [weak self] in
+            self?.captureSession?.stopRunning()
         }
+        result(nil)
     }
-    
-    func getCameraInfo(_ result: @escaping FlutterResult) {
-        result(self.cameraFacing.rawValue)
-    }
-    
-    func flipCamera(_ result: @escaping FlutterResult) {
-        if let sc: MTBBarcodeScanner = self.scanner {
-            if sc.hasOppositeCamera() {
-                sc.flipCamera()
-                self.cameraFacing = sc.camera
-            }
-            return result(sc.camera.rawValue)
-        }
-        return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
-    }
-    
-    func getFlashInfo(_ result: @escaping FlutterResult) {
-        if let sc: MTBBarcodeScanner = self.scanner {
-            result(sc.torchMode.rawValue != 0)
-        } else {
-            let error = FlutterError(code: "cameraInformationError", message: "Could not get flash information", details: nil)
-            result(error)
-        }
-    }
-    
-    func toggleFlash(_ result: @escaping FlutterResult){
-        if let sc: MTBBarcodeScanner = self.scanner {
-            if sc.hasTorch() {
-                sc.toggleTorch()
-                return result(sc.torchMode == MTBTorchMode(rawValue: 1))
-            }
-            return result(FlutterError(code: "404", message: "This device doesn\'t support flash", details: nil))
-        }
-        return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
-    }
-    
+
     func pauseCamera(_ result: @escaping FlutterResult) {
-        if let sc: MTBBarcodeScanner = self.scanner {
-            if sc.isScanning() {
-                sc.freezeCapture()
-            }
-            return result(true)
+        guard captureSession != nil else {
+            return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
         }
-        return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
+        sessionQueue.async { [weak self] in
+            self?.captureSession?.stopRunning()
+        }
+        result(true)
     }
-    
+
     func resumeCamera(_ result: @escaping FlutterResult) {
-        if let sc: MTBBarcodeScanner = self.scanner {
-            if !sc.isScanning() {
-                sc.unfreezeCapture()
-            }
-            return result(true)
+        guard captureSession != nil else {
+            return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
         }
-        return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
+        sessionQueue.async { [weak self] in
+            self?.captureSession?.startRunning()
+        }
+        result(true)
     }
+
+    func getCameraInfo(_ result: @escaping FlutterResult) {
+        result(channelValue(from: cameraPosition))
+    }
+
+    func flipCamera(_ result: @escaping FlutterResult) {
+        guard let session = captureSession else {
+            return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
+        }
+
+        let newPosition: AVCaptureDevice.Position = cameraPosition == .back ? .front : .back
+        guard captureDevice(for: newPosition) != nil else {
+            return result(channelValue(from: cameraPosition))
+        }
+
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            session.beginConfiguration()
+            // Remove current input
+            for input in session.inputs {
+                session.removeInput(input)
+            }
+            // Add new input
+            if let device = self.captureDevice(for: newPosition),
+               let input = try? AVCaptureDeviceInput(device: device),
+               session.canAddInput(input) {
+                session.addInput(input)
+                self.currentDevice = device
+                self.cameraPosition = newPosition
+            }
+            session.commitConfiguration()
+            DispatchQueue.main.async {
+                result(self.channelValue(from: self.cameraPosition))
+            }
+        }
+    }
+
+    // MARK: - Flash / torch
+
+    func getFlashInfo(_ result: @escaping FlutterResult) {
+        guard let device = currentDevice else {
+            return result(FlutterError(code: "cameraInformationError", message: "Could not get flash information", details: nil))
+        }
+        result(device.torchMode == .on)
+    }
+
+    func toggleFlash(_ result: @escaping FlutterResult) {
+        guard let device = currentDevice else {
+            return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
+        }
+        guard device.hasTorch && device.isTorchAvailable else {
+            return result(FlutterError(code: "404", message: "This device doesn't support flash", details: nil))
+        }
+        do {
+            try device.lockForConfiguration()
+            device.torchMode = device.torchMode == .on ? .off : .on
+            device.unlockForConfiguration()
+            result(device.torchMode == .on)
+        } catch {
+            result(FlutterError(code: "404", message: "Could not toggle flash", details: "\(error)"))
+        }
+    }
+
+    // MARK: - System features
 
     func getSystemFeatures(_ result: @escaping FlutterResult) {
-        if let sc: MTBBarcodeScanner = scanner {
-            var hasBackCameraVar = false
-            var hasFrontCameraVar = false
-            let camera = sc.camera
-
-            if(camera == MTBCamera(rawValue: 0)){
-                hasBackCameraVar = true
-                if sc.hasOppositeCamera() {
-                    hasFrontCameraVar = true
-                }
-            }else{
-                hasFrontCameraVar = true
-                if sc.hasOppositeCamera() {
-                    hasBackCameraVar = true
-                }
-            }
-            return result([
-                "hasFrontCamera": hasFrontCameraVar,
-                "hasBackCamera": hasBackCameraVar,
-                "hasFlash": sc.hasTorch(),
-                "activeCamera": camera.rawValue
-            ])
+        guard let device = currentDevice else {
+            return result(FlutterError(code: "404", message: nil, details: nil))
         }
-        return result(FlutterError(code: "404", message: nil, details: nil))
+        let hasBack  = captureDevice(for: .back)  != nil
+        let hasFront = captureDevice(for: .front) != nil
+        result([
+            "hasFrontCamera": hasFront,
+            "hasBackCamera":  hasBack,
+            "hasFlash":       device.hasTorch && device.isTorchAvailable,
+            "activeCamera":   channelValue(from: cameraPosition)
+        ])
     }
 
- }
+    // MARK: - Helpers
+
+    private func captureDevice(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera],
+            mediaType: .video,
+            position: position
+        )
+        return discovery.devices.first
+    }
+}
