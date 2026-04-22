@@ -190,9 +190,10 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
             metadataOutput = nil
             currentDevice = nil
         }
-        DispatchQueue.main.async { [weak self] in
-            self?.previewLayer?.removeFromSuperlayer()
-            self?.previewLayer = nil
+        let oldLayer = previewLayer
+        previewLayer = nil
+        DispatchQueue.main.async {
+            oldLayer?.removeFromSuperlayer()
         }
         let session = AVCaptureSession()
         captureSession = session
