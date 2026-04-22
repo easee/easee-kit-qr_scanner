@@ -63,9 +63,7 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
     }
 
     deinit {
-        sessionQueue.sync {
-            captureSession?.stopRunning()
-        }
+        captureSession?.stopRunning()
     }
 
     public func view() -> UIView {
@@ -112,11 +110,6 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
                        scanAreaOffset: Double) {
         previewView.frame = CGRect(x: 0, y: 0, width: width, height: height)
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.previewLayer?.frame = self.previewView.bounds
-        }
-
         if scanAreaWidth != 0 && scanAreaHeight != 0 {
             let midX = previewView.bounds.midX
             let midY = previewView.bounds.midY
@@ -131,14 +124,27 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
             }
             pendingScanRect = rect
 
-            // Apply immediately if the session is already running
             if let session = captureSession, session.isRunning,
                let layer = previewLayer,
                let output = metadataOutput {
-                let converted = layer.metadataOutputRectConverted(fromLayerRect: rect)
-                sessionQueue.async {
-                    output.rectOfInterest = converted
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    layer.frame = self.previewView.bounds
+                    let converted = layer.metadataOutputRectConverted(fromLayerRect: rect)
+                    self.sessionQueue.async {
+                        output.rectOfInterest = converted
+                    }
                 }
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.previewLayer?.frame = self.previewView.bounds
+                }
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.previewLayer?.frame = self.previewView.bounds
             }
         }
 
@@ -155,12 +161,17 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
             DispatchQueue.main.async {
                 self.channel.invokeMethod("onPermissionSet", arguments: granted)
             }
-            guard granted else { return }
+            guard granted else {
+                return
+            }
             self.sessionQueue.async {
                 do {
                     try self.configureSession()
                     self.captureSession?.startRunning()
                     self.applyPendingScanRect()
+                    DispatchQueue.main.async {
+                        result(nil)
+                    }
                 } catch {
                     DispatchQueue.main.async {
                         result(FlutterError(code: "unknown-error", message: "Unable to start scanning", details: "\(error)"))
@@ -171,9 +182,21 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
     }
 
     private func configureSession() throws {
+        // Tear down any existing session before reconfiguring
+        if let existing = captureSession {
+            existing.stopRunning()
+            captureSession = nil
+            metadataOutput = nil
+            currentDevice = nil
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.previewLayer?.removeFromSuperlayer()
+            self?.previewLayer = nil
+        }
         let session = AVCaptureSession()
         captureSession = session
         session.beginConfiguration()
+        defer { session.commitConfiguration() }
 
         guard let device = captureDevice(for: cameraPosition) else {
             throw NSError(domain: "QRScanner", code: 1, userInfo: [NSLocalizedDescriptionKey: "No camera available"])
@@ -197,8 +220,6 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
             : allowedBarcodeTypes.filter { output.availableMetadataObjectTypes.contains($0) }
         output.metadataObjectTypes = requested
         metadataOutput = output
-
-        session.commitConfiguration()
 
         let layer = AVCaptureVideoPreviewLayer(session: session)
         layer.videoGravity = .resizeAspectFill
