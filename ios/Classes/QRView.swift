@@ -162,7 +162,9 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
                 self.channel.invokeMethod("onPermissionSet", arguments: granted)
             }
             guard granted else {
-                result(nil)
+                DispatchQueue.main.async {
+                    result(nil)
+                }
                 return
             }
             self.sessionQueue.async {
