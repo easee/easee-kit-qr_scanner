@@ -14,7 +14,6 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
     private var cameraPosition: AVCaptureDevice.Position
     private var pendingScanRect: CGRect?
     private var allowedBarcodeTypes: [AVMetadataObject.ObjectType] = []
-    private var scanResultBlock: (([AVMetadataObject]) -> Void)?
 
     var registrar: FlutterPluginRegistrar
     var channel: FlutterMethodChannel
