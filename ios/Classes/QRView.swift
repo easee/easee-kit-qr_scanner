@@ -19,7 +19,7 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
     var channel: FlutterMethodChannel
 
     // Channel integer (0=back, 1=front) → AVCaptureDevice.Position
-    private func avPosition(from channelValue: Int) -> AVCaptureDevice.Position {
+    private static func avPosition(from channelValue: Int) -> AVCaptureDevice.Position {
         channelValue == 1 ? .front : .back
     }
 
@@ -54,7 +54,7 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
         self.registrar = registrar
         self.previewView = UIView(frame: frame)
         let facingRaw = Int(params["cameraFacing"] as! Double)
-        self.cameraPosition = facingRaw == 1 ? .front : .back
+        self.cameraPosition = QRView.avPosition(from: facingRaw)
         self.channel = FlutterMethodChannel(
             name: "net.touchcapture.qr.flutterqr/qrview_\(id)",
             binaryMessenger: registrar.messenger()
