@@ -62,8 +62,9 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
     }
 
     deinit {
-        sessionQueue.sync {
-            captureSession?.stopRunning()
+        let session = captureSession
+        sessionQueue.async {
+            session?.stopRunning()
         }
     }
 
