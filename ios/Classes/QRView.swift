@@ -337,33 +337,36 @@ public class QRView: NSObject, FlutterPlatformView, AVCaptureMetadataOutputObjec
     }
 
     func flipCamera(_ result: @escaping FlutterResult) {
-        guard let session = captureSession else {
-            return result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
-        }
-
-        let newPosition: AVCaptureDevice.Position = cameraPosition == .back ? .front : .back
-        guard captureDevice(for: newPosition) != nil else {
-            return result(channelValue(from: cameraPosition))
-        }
-
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
+            guard let session = self.captureSession else {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "404", message: "No barcode scanner found", details: nil))
+                }
+                return
+            }
+            let newPosition: AVCaptureDevice.Position = self.cameraPosition == .back ? .front : .back
+            guard let device = self.captureDevice(for: newPosition) else {
+                let current = self.channelValue(from: self.cameraPosition)
+                DispatchQueue.main.async {
+                    result(current)
+                }
+                return
+            }
             session.beginConfiguration()
-            // Remove current input
             for input in session.inputs {
                 session.removeInput(input)
             }
-            // Add new input
-            if let device = self.captureDevice(for: newPosition),
-               let input = try? AVCaptureDeviceInput(device: device),
+            if let input = try? AVCaptureDeviceInput(device: device),
                session.canAddInput(input) {
                 session.addInput(input)
                 self.currentDevice = device
                 self.cameraPosition = newPosition
             }
             session.commitConfiguration()
+            let updated = self.channelValue(from: self.cameraPosition)
             DispatchQueue.main.async {
-                result(self.channelValue(from: self.cameraPosition))
+                result(updated)
             }
         }
     }
