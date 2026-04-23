@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "qr_code_scanner",
     platforms: [
-        .iOS(.v16)
+        .iOS("16.1")
     ],
     products: [
         .library(name: "qr-code-scanner", targets: ["qr_code_scanner"])
