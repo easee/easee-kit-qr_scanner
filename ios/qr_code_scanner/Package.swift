@@ -12,7 +12,8 @@ let package = Package(
     targets: [
         .target(
             name: "qr_code_scanner",
-            path: "Classes"
+            dependencies: [],
+            path: "Sources/qr_code_scanner"
         )
     ]
 )

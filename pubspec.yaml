@@ -25,7 +25,8 @@ flutter:
         package: net.touchcapture.qr.flutterqr
         pluginClass: FlutterQrPlugin
       ios:
-        pluginClass: FlutterQrPlugin
+        pluginClass: SwiftFlutterQrPlugin
+        sharedDarwinSource: false
 #      web:
 #        pluginClass: FlutterQrPlugin
 #        fileName: flutter_qr_web.dart

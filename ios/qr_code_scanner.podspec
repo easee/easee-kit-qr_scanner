@@ -13,8 +13,7 @@ A new Flutter project.
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Your Company' => 'juliuscanute[*]touchcapture.net' }
   s.source           = { :path => '.' }
-  s.source_files = 'Classes/**/*'
-  s.public_header_files = 'Classes/**/*.h'
+  s.source_files = 'qr_code_scanner/Sources/qr_code_scanner/**/*.swift'
   s.dependency 'Flutter'
   s.ios.deployment_target = '16.1'
   s.swift_version = '5.9'
