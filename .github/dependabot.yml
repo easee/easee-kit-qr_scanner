@@ -13,7 +13,7 @@ updates:
     reviewers:
       - "juliansteenbakker"
   - package-ecosystem: gradle
-    directory: "/example/android"
+    directory: "/app/android"
     schedule:
       interval: "weekly"
     reviewers:
